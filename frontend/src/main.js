@@ -1,0 +1,779 @@
+import { Chart, registerables } from 'chart.js';
+import { Tower3DViewer } from './tower3d.js';
+Chart.register(...registerables);
+
+const API_BASE = '';
+
+const DEFAULT_TOWERS = {
+    1: {
+        tower_id: 1, tower_name: '临冲吕公车-一号', build_date: '1450-03-15',
+        material: '松木+铁木', total_height: 18.5, total_layers: 5,
+        base_width: 6.2, base_depth: 4.8, total_weight: 28.5,
+        design_load: 850.0, design_wind_speed: 35.0,
+        material_strength: 45.0, elastic_modulus: 12000.0, poisson_ratio: 0.38,
+    },
+    2: {
+        tower_id: 2, tower_name: '临冲吕公车-二号', build_date: '1452-07-22',
+        material: '柏木+楠木', total_height: 21.0, total_layers: 6,
+        base_width: 6.8, base_depth: 5.2, total_weight: 36.8,
+        design_load: 1020.0, design_wind_speed: 40.0,
+        material_strength: 52.0, elastic_modulus: 13500.0, poisson_ratio: 0.36,
+    },
+};
+
+const SOIL_NAMES = {
+    sand: { name: '砂土', icon: '🏖️' },
+    clay: { name: '黏土', icon: '🟫' },
+    silt: { name: '粉土', icon: '🏜️' },
+    rock: { name: '岩层', icon: '🪨' },
+    loam: { name: '壤土', icon: '🌱' },
+};
+
+const ALERT_NAMES = {
+    tilt_exceed: '倾斜超限',
+    stress_critical: '应力临界',
+    wind_overload: '风荷载超载',
+    ground_failure: '地面承载失效',
+    vibration_exceed: '振动超限共振',
+    structure_instability: '结构失稳',
+};
+
+let currentTower = DEFAULT_TOWERS[1];
+let viewer = null;
+let layerChart = null;
+let historyChart = null;
+let stressHistory = [];
+let analysisSSE = null;
+let sensorSSE = null;
+let alertSSE = null;
+let currentChartMode = 'stress';
+
+document.addEventListener('DOMContentLoaded', () => {
+    initApp();
+});
+
+function initApp() {
+    init3DViewer();
+    initCharts();
+    loadTowerInfo();
+    bindEvents();
+    loadInitialAnalysis();
+    loadGroundAnalysis();
+    connectSSE();
+    setConnectionStatus('connected', '已连接');
+}
+
+function init3DViewer() {
+    const canvas = document.getElementById('towerCanvas');
+    viewer = new Tower3DViewer(canvas, currentTower);
+    viewer.legendMaxStress = currentTower.material_strength;
+
+    const dummyStresses = [];
+    for (let i = 1; i <= currentTower.total_layers; i++) {
+        dummyStresses.push({
+            layer: i,
+            stress: 10 + i * 4,
+        });
+    }
+    viewer.updateLayerStresses(dummyStresses, currentTower.material_strength);
+}
+
+function initCharts() {
+    const mainCtx = document.getElementById('layerChart').getContext('2d');
+    const histCtx = document.getElementById('historyChart').getContext('2d');
+
+    layerChart = new Chart(mainCtx, {
+        type: 'bar',
+        data: {
+            labels: Array.from({ length: currentTower.total_layers }, (_, i) => `第${i + 1}层`),
+            datasets: [{
+                label: '应力 (MPa)',
+                data: Array(currentTower.total_layers).fill(0),
+                backgroundColor: ctx => {
+                    const max = currentTower.material_strength;
+                    const v = ctx.parsed?.y || 0;
+                    const r = Math.min(v / max, 1);
+                    const hue = 120 - r * 120;
+                    return `hsl(${hue}, 70%, 50%)`;
+                },
+                borderRadius: 6,
+                borderSkipped: false,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
+                tooltip: {
+                    backgroundColor: 'rgba(26, 36, 56, 0.95)',
+                    titleColor: '#e8edf5',
+                    bodyColor: '#94a3b8',
+                    borderColor: '#2a3a5c',
+                    borderWidth: 1,
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(42, 58, 92, 0.5)' },
+                    ticks: { color: '#94a3b8', font: { size: 10 } }
+                },
+                y: {
+                    grid: { color: 'rgba(42, 58, 92, 0.5)' },
+                    ticks: { color: '#94a3b8', font: { size: 10 } },
+                    beginAtZero: true,
+                }
+            },
+            animation: { duration: 800, easing: 'easeOutCubic' }
+        }
+    });
+
+    historyChart = new Chart(histCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: '最大应力',
+                    data: [],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                },
+                {
+                    label: '临界值',
+                    data: [],
+                    borderColor: '#f59e0b',
+                    borderDash: [4, 4],
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    fill: false,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 12 } },
+                tooltip: {
+                    backgroundColor: 'rgba(26, 36, 56, 0.95)',
+                    titleColor: '#e8edf5',
+                    bodyColor: '#94a3b8',
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 6 }
+                },
+                y: {
+                    grid: { color: 'rgba(42, 58, 92, 0.3)' },
+                    ticks: { color: '#94a3b8', font: { size: 9 } },
+                    beginAtZero: true,
+                }
+            },
+            animation: { duration: 500 }
+        }
+    });
+}
+
+function loadTowerInfo() {
+    const info = document.getElementById('towerInfo');
+    const fields = [
+        ['塔号', `#${currentTower.tower_id}`],
+        ['建造年代', currentTower.build_date],
+        ['材质结构', currentTower.material],
+        ['总高度', `${currentTower.total_height} m`],
+        ['层数', `${currentTower.total_layers} 层`],
+        ['底宽 × 底深', `${currentTower.base_width} × ${currentTower.base_depth} m`],
+        ['总重量', `${currentTower.total_weight} 吨`],
+        ['设计荷载', `${currentTower.design_load} kN`],
+        ['设计风速', `${currentTower.design_wind_speed} m/s`],
+        ['材料强度', `${currentTower.material_strength} MPa`],
+        ['弹性模量', `${(currentTower.elastic_modulus / 1000).toFixed(1)} GPa`],
+        ['泊松比', currentTower.poisson_ratio.toFixed(2)],
+    ];
+    info.innerHTML = fields.map(([k, v]) => `
+        <div class="info-row"><span class="k">${k}</span><span class="v">${v}</span></div>
+    `).join('');
+}
+
+function bindEvents() {
+    document.getElementById('towerSelect').addEventListener('change', e => {
+        const id = parseInt(e.target.value);
+        currentTower = DEFAULT_TOWERS[id];
+        restart();
+    });
+
+    document.querySelectorAll('.view-controls .view-btn[data-view]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.view-controls .view-btn[data-view]').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            viewer.setCameraView(btn.dataset.view);
+        });
+    });
+
+    document.getElementById('btnStressView').addEventListener('click', () => {
+        document.getElementById('btnStressView').classList.add('active');
+        document.getElementById('btnStructView').classList.remove('active');
+        viewer.setStressView(true);
+    });
+    document.getElementById('btnStructView').addEventListener('click', () => {
+        document.getElementById('btnStructView').classList.add('active');
+        document.getElementById('btnStressView').classList.remove('active');
+        viewer.setStressView(false);
+    });
+
+    document.querySelectorAll('.chart-switch .sw').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.chart-switch .sw').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentChartMode = btn.dataset.chart;
+            updateChartMode();
+        });
+    });
+
+    document.getElementById('groundAnalyzeBtn').addEventListener('click', loadGroundAnalysis);
+    document.getElementById('simulateBtn').addEventListener('click', runSimulation);
+}
+
+function restart() {
+    if (viewer) viewer.dispose();
+    stressHistory = [];
+    closeSSE();
+    if (layerChart) layerChart.destroy();
+    if (historyChart) historyChart.destroy();
+
+    loadTowerInfo();
+    init3DViewer();
+    initCharts();
+    loadInitialAnalysis();
+    loadGroundAnalysis();
+    connectSSE();
+}
+
+function updateChartMode() {
+    if (!layerChart) return;
+    const mode = currentChartMode;
+
+    layerChart.data.datasets = [{
+        data: Array(currentTower.total_layers).fill(0),
+        borderRadius: 6, borderSkipped: false,
+    }];
+
+    if (mode === 'stress') {
+        layerChart.data.datasets[0].label = '应力 (MPa)';
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const max = currentTower.material_strength;
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / max, 1);
+            const hue = 120 - r * 120;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    } else if (mode === 'tilt') {
+        layerChart.data.datasets[0].label = '倾斜 (°)';
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / 5, 1);
+            const hue = 120 - r * 120;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    } else {
+        layerChart.data.datasets[0].label = '风荷载 (N/m²)';
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / 500, 1);
+            const hue = 200 - r * 140;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    }
+    layerChart.update('none');
+}
+
+async function loadInitialAnalysis() {
+    try {
+        const resp = await fetch(`${API_BASE}/api/towers/${currentTower.tower_id}/analysis`);
+        const json = await resp.json();
+        if (json.code === 200 && json.data) {
+            updateAnalysisPanel(json.data);
+        }
+    } catch (e) {
+        updateAnalysisPanel(generateMockAnalysis());
+    }
+}
+
+async function loadGroundAnalysis() {
+    const ws = parseFloat(document.getElementById('windInput')?.value || 20);
+    const tl = parseFloat(document.getElementById('tiltInput')?.value || 1);
+
+    let data = null;
+    try {
+        const resp = await fetch(
+            `${API_BASE}/api/towers/${currentTower.tower_id}/ground?wind_speed=${ws}&tilt_deg=${tl}`
+        );
+        const json = await resp.json();
+        if (json.code === 200) data = json.data;
+    } catch (e) {}
+
+    if (!data) data = generateMockGround(ws, tl);
+    renderGroundAnalysis(data);
+}
+
+function renderGroundAnalysis(grounds) {
+    const grid = document.getElementById('groundGrid');
+    grid.innerHTML = grounds.map(g => {
+        const info = SOIL_NAMES[g.soil_type] || { name: g.soil_type, icon: '🏞️' };
+        const scoreCls = g.passability_score >= 75 ? 'good' : (g.passability_score >= 50 ? 'mid' : 'bad');
+        const riskCls = g.risk_level === 1 ? 'low' : (g.risk_level === 2 ? 'med' : 'high');
+        return `
+            <div class="ground-card risk-${riskCls} ${g.can_pass ? 'can-pass' : 'cannot-pass'} score-${scoreCls}">
+                <div class="ground-soil-name"><span class="ground-soil-icon">${info.icon}</span> ${info.name}</div>
+                <div class="ground-score">${g.passability_score.toFixed(0)}</div>
+                <div class="ground-detail">
+                    <div class="ground-detail-row"><span>承载力</span><span>${g.bearing_capacity.toFixed(0)} kPa</span></div>
+                    <div class="ground-detail-row"><span>施加压力</span><span>${g.applied_pressure.toFixed(1)} kPa</span></div>
+                    <div class="ground-detail-row"><span>安全系数</span><span>${g.safety_factor.toFixed(2)}</span></div>
+                    <div class="ground-detail-row"><span>预计沉降</span><span>${g.settlement.toFixed(1)} mm</span></div>
+                    <div class="ground-detail-row"><span>差异沉降</span><span>${g.differential_settlement.toFixed(1)} mm</span></div>
+                </div>
+                <div class="ground-pass-badge ${g.can_pass ? 'yes' : 'no'}">
+                    ${g.can_pass ? '✓ 可通过' : '✗ 不可通过'}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function generateMockAnalysis() {
+    const maxStress = 18 + Math.random() * 15;
+    return {
+        safety_factor: (currentTower.material_strength / maxStress).toFixed(2),
+        critical_stress: currentTower.material_strength,
+        max_stress: maxStress.toFixed(2),
+        max_stress_layer: Math.ceil(currentTower.total_layers * 0.8),
+        max_tilt: (0.8 + Math.random() * 1.8).toFixed(2),
+        max_tilt_layer: currentTower.total_layers,
+        wind_resistance_limit: currentTower.design_wind_speed * 1.2,
+        current_wind_factor: (Math.random() * 0.5 + 0.2).toFixed(2),
+        ground_capacity_ratio: (Math.random() * 0.4 + 0.3).toFixed(2),
+        is_stable: 1,
+        stability_margin: (30 + Math.random() * 40).toFixed(1),
+        second_order_effect: (1 + Math.random() * 0.3).toFixed(2),
+        natural_frequency: (2 + Math.random()).toFixed(2),
+        damping_ratio: (0.03 + Math.random() * 0.02).toFixed(3),
+    };
+}
+
+function generateMockGround(ws, tl) {
+    return Object.keys(SOIL_NAMES).map(key => {
+        const caps = { sand: 180, clay: 120, silt: 90, rock: 800, loam: 200 };
+        const c = caps[key];
+        const base_p = currentTower.total_weight * 9.81 / (currentTower.base_width * currentTower.base_depth);
+        const wind_effect = ws * ws * 0.01 * 5;
+        const tilt_effect = tl * 4;
+        const applied = base_p + wind_effect + tilt_effect;
+        const sf = c / applied;
+        const settlement = key === 'rock' ? 1 : (key === 'clay' ? 80 : 30) * (1 + tl * 0.1);
+        const score = Math.max(0, Math.min(100,
+            (sf >= 3 ? 100 : sf * 30) + (settlement < 30 ? 40 : (settlement < 100 ? 20 : 0))
+        ));
+        return {
+            soil_type: key,
+            bearing_capacity: c,
+            applied_pressure: applied,
+            safety_factor: sf,
+            settlement,
+            differential_settlement: settlement * 0.3,
+            passability_score: score,
+            can_pass: score >= 50 ? 1 : 0,
+            risk_level: score >= 75 ? 1 : (score >= 30 ? 2 : 3),
+        };
+    });
+}
+
+function generateMockSensorData(windSpeed, baseTilt) {
+    const layers = [];
+    for (let l = 1; l <= currentTower.total_layers; l++) {
+        const h = l / currentTower.total_layers;
+        const q = 0.5 * 1.225 * 1.3 * windSpeed * windSpeed;
+        const base = 2 + h * 22;
+        const ws = q / 1000 * (1 + h * 0.5) * 15;
+        const sx = base + ws + (Math.random() - 0.5) * 3;
+        const sy = base * 0.75 + ws * 0.6 + (Math.random() - 0.5) * 2;
+        const sz = (currentTower.total_weight * 9.81 /
+                   (currentTower.base_width * currentTower.base_depth)) * (1 + h * 0.2);
+        const j2 = 0.5 * ((sx - sy) ** 2 + (sy - sz) ** 2 + (sz - sx) ** 2);
+        const vm = Math.sqrt(3 * j2);
+        layers.push({
+            layer_id: l,
+            layer_name: `第${l}层`,
+            stress_x: sx, stress_y: sy, stress_z: sz, stress_von_mises: vm,
+            tilt_x: baseTilt * (0.4 + h) * 1.2 + (Math.random() - 0.5) * 0.1,
+            tilt_y: baseTilt * (0.25 + h * 0.6) + (Math.random() - 0.5) * 0.08,
+            tilt_total: 0,
+            wind_load_x: q * (1 + h * 0.4),
+            wind_load_y: q * 0.35 * (1 + h * 0.2),
+        });
+    }
+    layers.forEach(l => {
+        l.tilt_total = Math.sqrt(l.tilt_x * l.tilt_x + l.tilt_y * l.tilt_y);
+    });
+
+    const sensor = layers.map(l => ({
+        layer_id: l.layer_id,
+        layer_name: l.layer_name,
+        stress_x: l.stress_x,
+        stress_y: l.stress_y,
+        stress_z: l.stress_z,
+        stress_von_mises: l.stress_von_mises,
+        tilt_x: l.tilt_x,
+        tilt_y: l.tilt_y,
+        tilt_total: l.tilt_total,
+        wind_load_x: l.wind_load_x,
+        wind_load_y: l.wind_load_y,
+        wind_speed: windSpeed,
+        ground_pressure: 0,
+        ground_settlement: 0,
+        soil_type: 'loam',
+        temperature: 22,
+        humidity: 65,
+        vibration_freq: 2.5,
+        vibration_amp: 0.3,
+    }));
+
+    return { layers, sensor };
+}
+
+async function runSimulation() {
+    const ws = 5 + Math.random() * 35;
+    const tilt = Math.random() * 3;
+    const { layers } = generateMockSensorData(ws, tilt);
+
+    const batch = {
+        tower_id: currentTower.tower_id,
+        tower_name: currentTower.tower_name,
+        timestamp: new Date().toISOString(),
+        layers,
+        environment: {
+            wind_speed: ws,
+            ground_pressure: currentTower.total_weight * 9.81 / (currentTower.base_width * currentTower.base_depth) * 1.1,
+            ground_settlement: 2 + Math.random() * 10,
+            soil_type: ['sand', 'clay', 'silt', 'rock', 'loam'][Math.floor(Math.random() * 5)],
+            temperature: 15 + Math.random() * 15,
+            humidity: 40 + Math.random() * 40,
+            vibration_freq: 2 + Math.random() * 2,
+            vibration_amp: 0.2 + Math.random() * 1.5,
+        }
+    };
+
+    let analysis = null, alerts = [], stresses = null;
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/sensor`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(batch)
+        });
+        const json = await resp.json();
+        if (json.code === 200 && json.data) {
+            analysis = json.data.analysis;
+            alerts = json.data.alerts || [];
+        }
+    } catch (e) {}
+
+    try {
+        const resp2 = await fetch(
+            `${API_BASE}/api/towers/${currentTower.tower_id}/analysis/custom?wind_speed=${ws.toFixed(1)}&tilt_deg=${tilt.toFixed(2)}`
+        );
+        const json2 = await resp2.json();
+        if (json2.code === 200) {
+            stresses = json2.data;
+            if (!analysis) analysis = json2.data.structure;
+        }
+    } catch (e) {}
+
+    if (!analysis) analysis = generateMockAnalysis();
+
+    const sensorData = layers.map(l => ({
+        ...l,
+        wind_speed: ws,
+        soil_type: batch.environment.soil_type,
+        ground_pressure: batch.environment.ground_pressure,
+    }));
+
+    updateFromData(sensorData, analysis, alerts, ws, batch.environment.soil_type);
+
+    if (stresses?.layer_stresses) {
+        const st = stresses.layer_stresses.map(([layer, vm, _tx, _tt]) => ({ layer, stress: vm }));
+        viewer.updateLayerStresses(st, currentTower.material_strength);
+    } else {
+        const st = layers.map(l => ({ layer: l.layer_id, stress: l.stress_von_mises }));
+        viewer.updateLayerStresses(st, currentTower.material_strength);
+    }
+}
+
+function updateFromData(sensorData, analysis, alerts, windSpeed, soilType) {
+    if (analysis) updateAnalysisPanel(analysis, soilType);
+
+    if (alerts?.length) {
+        alerts.forEach(addAlert);
+    }
+
+    if (windSpeed !== undefined) updateWindIndicator(windSpeed);
+
+    if (sensorData?.length) {
+        const stresses = sensorData.map(s => ({ layer: s.layer_id, stress: s.stress_von_mises }));
+        viewer.updateLayerStresses(stresses, currentTower.material_strength);
+        updateLayerChart(sensorData);
+
+        const maxTilt = sensorData.reduce((m, s) => s.tilt_total > m.tilt_total ? s : m, sensorData[0]);
+        updateTiltIndicator(maxTilt.tilt_x, maxTilt.tilt_y, maxTilt.tilt_total, analysis?.max_tilt_layer || maxTilt.layer_id);
+        viewer.updateTilt(maxTilt.tilt_x, maxTilt.tilt_y);
+
+        const max = analysis?.max_stress ||
+            sensorData.reduce((m, s) => Math.max(m, s.stress_von_mises), 0);
+        addHistoryPoint(max, analysis?.critical_stress || currentTower.material_strength);
+    }
+}
+
+function updateAnalysisPanel(an, soilType = null) {
+    const sf = parseFloat(an.safety_factor) || 0;
+    const margin = parseFloat(an.stability_margin) || 0;
+    const maxStress = parseFloat(an.max_stress) || 0;
+    const critStress = parseFloat(an.critical_stress) || currentTower.material_strength;
+    const wf = parseFloat(an.current_wind_factor) || 0;
+    const wl = parseFloat(an.wind_resistance_limit) || 0;
+    const gr = parseFloat(an.ground_capacity_ratio) || 0;
+    const so = parseFloat(an.second_order_effect) || 1;
+    const freq = parseFloat(an.natural_frequency) || 0;
+    const isStable = an.is_stable === 1 || an.is_stable === true;
+
+    setText('sfVal', sf.toFixed(2));
+    setText('marginVal', margin > 0 ? `+${margin.toFixed(1)}%` : `${margin.toFixed(1)}%`);
+    setText('maxStressVal', maxStress.toFixed(2));
+    setText('criticalStressVal', critStress.toFixed(1));
+    setText('windFactorVal', wf.toFixed(2));
+    setText('windLimitVal', wl.toFixed(1));
+    setText('groundRatioVal', (gr * 100).toFixed(1) + '%');
+    setText('orderVal', so.toFixed(2));
+    setText('freqVal', freq.toFixed(2));
+
+    if (soilType) {
+        const info = SOIL_NAMES[soilType];
+        if (info) setText('soilTypeVal', `${info.icon} ${info.name}`);
+    }
+
+    setBarWidth('sfBar', Math.min(sf / 5, 1) * 100);
+    setBarColor('sfBar', sf < 1.5 ? 'var(--danger)' : (sf < 2.5 ? 'var(--warning)' : 'var(--safe)'));
+    setBarWidth('marginBar', Math.max(0, Math.min(margin + 100, 200)) / 2);
+    setBarColor('marginBar', margin < 0 ? 'var(--danger)' : (margin < 20 ? 'var(--warning)' : 'var(--safe)'));
+    setBarWidth('stressBar', Math.min(maxStress / critStress, 1) * 100);
+    setBarColor('stressBar', maxStress / critStress > 0.9 ? 'var(--danger)' :
+        (maxStress / critStress > 0.75 ? 'var(--warning)' : 'var(--safe)'));
+    setBarWidth('windBar', Math.min(wf, 1) * 100);
+    setBarColor('windBar', wf > 0.95 ? 'var(--danger)' : (wf > 0.8 ? 'var(--warning)' : 'var(--cyan)'));
+    setBarWidth('groundBar', Math.min(gr, 1) * 100);
+    setBarColor('groundBar', gr > 0.95 ? 'var(--danger)' : (gr > 0.8 ? 'var(--warning)' : 'var(--purple)'));
+
+    const badge = document.getElementById('statusBadge');
+    badge.classList.remove('stable', 'unstable');
+    if (isStable) {
+        badge.classList.add('stable');
+        badge.textContent = `✓ 结构稳定 | 裕度 ${margin > 0 ? '+' : ''}${margin.toFixed(1)}%`;
+    } else {
+        badge.classList.add('unstable');
+        badge.textContent = '⚠ 结构失稳警告！';
+    }
+}
+
+function updateTiltIndicator(tx, ty, total, maxLayer) {
+    setText('tiltXVal', tx.toFixed(2) + '°');
+    setText('tiltYVal', ty.toFixed(2) + '°');
+    setText('tiltTotalVal', total.toFixed(2) + '°');
+    setText('tiltMaxLayer', maxLayer ? `第${maxLayer}层` : '-');
+
+    const ptr = document.getElementById('tiltPointer');
+    const maxAngle = 7;
+    const scale = 55 / maxAngle;
+    const rad = Math.atan2(ty, tx) * 180 / Math.PI;
+    const len = Math.min(total * scale, 60);
+    ptr.style.transform = `translate(-50%, 0) rotate(${rad - 90}deg) translateY(-${len / 2}px)`;
+    ptr.style.height = `${Math.max(len, 8)}px`;
+
+    const tv = document.querySelector('.tilt-value');
+    tv.style.color = total > 5 ? 'var(--danger)' : (total > 3 ? 'var(--warning)' : 'var(--accent-light)');
+}
+
+function updateWindIndicator(ws) {
+    setText('windSpeedVal', ws.toFixed(1));
+    const arrow = document.getElementById('windArrow');
+    arrow.style.transform = `rotate(${(ws * 12) % 360}deg) scale(${1 + Math.min(ws / 40, 0.8)})`;
+
+    let level = '无';
+    if (ws < 1) level = '无风';
+    else if (ws < 5) level = '微风';
+    else if (ws < 10) level = '轻风';
+    else if (ws < 17) level = '和风';
+    else if (ws < 25) level = '大风';
+    else if (ws < 35) level = '强风';
+    else if (ws < 45) level = '狂风';
+    else level = '暴风';
+    setText('windLevelLabel', level);
+}
+
+function updateLayerChart(sensorData) {
+    if (!layerChart) return;
+    const mode = currentChartMode;
+
+    if (mode === 'stress') {
+        layerChart.data.datasets[0].data = sensorData.map(s => s.stress_von_mises);
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const max = currentTower.material_strength;
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / max, 1);
+            const hue = 120 - r * 120;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    } else if (mode === 'tilt') {
+        layerChart.data.datasets[0].data = sensorData.map(s => s.tilt_total);
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / 5, 1);
+            const hue = 120 - r * 120;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    } else {
+        layerChart.data.datasets[0].data = sensorData.map(s =>
+            Math.sqrt(s.wind_load_x ** 2 + s.wind_load_y ** 2)
+        );
+        layerChart.data.datasets[0].backgroundColor = ctx => {
+            const v = ctx.parsed?.y || 0;
+            const r = Math.min(v / 500, 1);
+            const hue = 200 - r * 140;
+            return `hsl(${hue}, 70%, 50%)`;
+        };
+    }
+    layerChart.data.labels = sensorData.map(s => s.layer_name);
+    layerChart.update('active');
+}
+
+function addHistoryPoint(stress, critical) {
+    const now = new Date();
+    const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    stressHistory.push({ label, stress, critical });
+    if (stressHistory.length > 30) stressHistory.shift();
+
+    historyChart.data.labels = stressHistory.map(s => s.label);
+    historyChart.data.datasets[0].data = stressHistory.map(s => s.stress);
+    historyChart.data.datasets[1].data = stressHistory.map(() => critical);
+    historyChart.update('none');
+}
+
+function addAlert(alert) {
+    const list = document.getElementById('alertList');
+    const empty = list.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const name = ALERT_NAMES[alert.alert_type] || alert.alert_type;
+    const time = new Date(alert.timestamp).toLocaleTimeString('zh-CN');
+    const levelCls = 'level-' + alert.alert_level;
+    const levelText = ['', '预警', '告警', '危险'][alert.alert_level] || '';
+
+    const item = document.createElement('div');
+    item.className = `alert-item ${levelCls}`;
+    item.innerHTML = `
+        <div class="alert-header">
+            <div class="alert-type">${name} · ${levelText}</div>
+            <div class="alert-time">${time} · ${alert.layer_id ? '第' + alert.layer_id + '层' : '整体'}</div>
+        </div>
+        <div class="alert-desc">${alert.description}</div>
+        <div class="alert-metric">
+            <span>${alert.metric_name || ''}</span>
+            <span class="metric">
+                ${(alert.metric_value ?? '-').toFixed(2)} / 阈值 ${(alert.threshold ?? '-').toFixed(2)}
+            </span>
+        </div>
+    `;
+    list.insertBefore(item, list.firstChild);
+
+    const count = document.getElementById('alertCount');
+    const current = parseInt(count.textContent || '0') + 1;
+    count.textContent = current;
+    count.classList.remove('zero');
+
+    while (list.children.length > 50) {
+        list.removeChild(list.lastChild);
+    }
+}
+
+function connectSSE() {
+    try {
+        analysisSSE = new EventSource(`${API_BASE}/api/stream/analysis`);
+        analysisSSE.addEventListener('analysis', e => {
+            try {
+                const data = JSON.parse(e.data);
+                updateAnalysisPanel(data);
+            } catch {}
+        });
+
+        sensorSSE = new EventSource(`${API_BASE}/api/stream/sensor`);
+        sensorSSE.addEventListener('sensor', e => {
+            try {
+                const data = JSON.parse(e.data);
+                if (Array.isArray(data) && data.length) {
+                    const tid = data[0].tower_id;
+                    if (tid === currentTower.tower_id) {
+                        const analysis = null;
+                        const alerts = [];
+                        const ws = data[0].wind_speed;
+                        const soil = data[0].soil_type;
+                        updateFromData(data, analysis, alerts, ws, soil);
+                    }
+                }
+            } catch {}
+        });
+
+        alertSSE = new EventSource(`${API_BASE}/api/stream/alerts`);
+        alertSSE.addEventListener('alert', e => {
+            try {
+                const a = JSON.parse(e.data);
+                if (a.tower_id === currentTower.tower_id) addAlert(a);
+            } catch {}
+        });
+
+        [analysisSSE, sensorSSE, alertSSE].forEach(s => {
+            if (s) s.onerror = () => {};
+        });
+    } catch (e) {
+        console.warn('SSE 不可用，将使用轮询');
+    }
+}
+
+function closeSSE() {
+    [analysisSSE, sensorSSE, alertSSE].forEach(s => s?.close());
+    analysisSSE = sensorSSE = alertSSE = null;
+}
+
+function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+}
+function setBarWidth(id, pct) {
+    const el = document.getElementById(id);
+    if (el) el.style.width = pct + '%';
+}
+function setBarColor(id, color) {
+    const el = document.getElementById(id);
+    if (el) el.style.background = color;
+}
+function setConnectionStatus(cls, text) {
+    const s = document.getElementById('connectionStatus');
+    if (!s) return;
+    s.className = 'status-indicator ' + cls;
+    const t = s.querySelector('.status-text');
+    if (t) t.textContent = text;
+}
