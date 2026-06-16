@@ -50,6 +50,7 @@ pub struct AnalysisQuery {
     pub wind_speed: Option<f64>,
     pub tilt_deg: Option<f64>,
     pub soil_type: Option<String>,
+    pub moisture_pct: Option<f64>,
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -234,8 +235,9 @@ pub async fn run_custom_analysis(
 
     let sensor_data = generate_dummy_sensor_data_with_params(&tower, wind_speed, tilt_deg);
     let analysis = state.stability.check_stability(&tower, &sensor_data, &state.config);
-    let ground = state.ground.analyze(&tower, soil_type, wind_speed, tilt_deg, None);
-    let all_grounds = state.ground.analyze_all_soils(&tower, wind_speed, tilt_deg);
+    let moisture = params.moisture_pct;
+    let ground = state.ground.analyze(&tower, soil_type, wind_speed, tilt_deg, None, moisture);
+    let all_grounds = state.ground.analyze_all_soils(&tower, wind_speed, tilt_deg, moisture);
 
     let mut fem = state.fem.lock();
     fem.build_tower_mesh(&tower);
@@ -245,6 +247,7 @@ pub async fn run_custom_analysis(
     fem.apply_boundary_conditions(&tower);
     fem.solve();
     let fem_results = fem.get_node_results(tower_id, chrono::Utc::now(), tower.material_strength);
+    let layer_stresses = fem.get_layer_stresses(&tower, wind_speed);
     drop(fem);
 
     (StatusCode::OK, Json(ApiResponse::success(serde_json::json!({
@@ -253,7 +256,7 @@ pub async fn run_custom_analysis(
         "ground_all_soils": all_grounds,
         "fem_sample": &fem_results.iter().take(20).cloned().collect::<Vec<_>>(),
         "fem_total_nodes": fem_results.len(),
-        "layer_stresses": fem.get_layer_stresses(&tower, wind_speed)
+        "layer_stresses": layer_stresses
     }))))
 }
 
@@ -265,8 +268,9 @@ pub async fn run_ground_analysis(
     let tower = get_default_tower(tower_id);
     let wind_speed = params.wind_speed.unwrap_or(15.0);
     let tilt_deg = params.tilt_deg.unwrap_or(0.5);
+    let moisture = params.moisture_pct;
 
-    let all_grounds = state.ground.analyze_all_soils(&tower, wind_speed, tilt_deg);
+    let all_grounds = state.ground.analyze_all_soils(&tower, wind_speed, tilt_deg, moisture);
     let _ = state.db.insert_ground_analysis(&all_grounds).await;
 
     (StatusCode::OK, Json(ApiResponse::success(all_grounds)))

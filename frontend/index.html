@@ -41,8 +41,23 @@
                     <span class="separator"></span>
                     <button class="view-btn active" id="btnStressView">应力云图</button>
                     <button class="view-btn" id="btnStructView">结构视图</button>
+                    <span class="separator"></span>
+                    <div class="cut-group">
+                        <span class="cut-label">剖切</span>
+                        <button class="view-btn active" data-cut="none">无</button>
+                        <button class="view-btn" data-cut="cut_front">前</button>
+                        <button class="view-btn" data-cut="cut_right">右</button>
+                        <button class="view-btn" data-cut="cut_quarter">1/4</button>
+                        <button class="view-btn" data-cut="cut_half">半剖</button>
+                    </div>
+                    <span class="separator"></span>
+                    <label class="explode-slider">
+                        <span>爆炸</span>
+                        <input type="range" id="explodeSlider" min="0" max="4" step="0.1" value="0">
+                    </label>
                 </div>
             </div>
+            <div class="layer-control-bar" id="layerControlBar"></div>
             <div class="canvas-wrap">
                 <canvas id="towerCanvas"></canvas>
                 <div id="tiltIndicator" class="tilt-indicator">
@@ -188,6 +203,7 @@
                 <div class="ground-inputs">
                     <label>风速 (m/s): <input type="number" id="windInput" value="20" min="0" max="80"></label>
                     <label>倾斜 (°): <input type="number" id="tiltInput" value="1.0" step="0.1" min="0" max="10"></label>
+                    <label>含水率 (%): <input type="number" id="moistureInput" value="50" step="1" min="0" max="100"></label>
                     <button id="groundAnalyzeBtn" class="btn-secondary">重新分析</button>
                 </div>
             </div>

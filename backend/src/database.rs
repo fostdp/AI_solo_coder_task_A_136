@@ -1,91 +1,87 @@
 use crate::config::ClickHouseConfig;
 use crate::models::{AlertEvent, FEMNodeResult, GroundAnalysis, SensorData, StructureAnalysis, TowerMetadata};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use reqwest::Client;
+use serde::Serialize;
 
 pub struct ClickHouseClient {
     config: ClickHouseConfig,
-    client: Option<Arc<Mutex<clickhouse::Client>>>,
+    http: Client,
+    base_url: String,
 }
 
 impl ClickHouseClient {
     pub fn new(config: ClickHouseConfig) -> Self {
+        let base_url = if config.user.is_empty() || config.password.is_empty() {
+            config.url.clone()
+        } else {
+            let scheme = if config.url.starts_with("https://") { "https" } else { "http" };
+            let host_part = config.url.trim_start_matches("http://").trim_start_matches("https://");
+            format!("{}://{}:{}@{}", scheme, urlencode(&config.user), urlencode(&config.password), host_part)
+        };
         Self {
             config,
-            client: None,
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            base_url,
         }
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let url = format!("{}?database={}", self.config.url, self.config.database);
-        let mut client_builder = clickhouse::Client::default()
-            .with_url(url)
-            .with_user(self.config.user.clone())
-            .with_password(self.config.password.clone());
+        Ok(())
+    }
 
-        let client = Arc::new(Mutex::new(client_builder));
-        self.client = Some(client);
+    async fn insert_rows<T: Serialize>(&self, table: &str, rows: &[T]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let json_lines: Vec<String> = rows.iter()
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if json_lines.is_empty() {
+            return Ok(());
+        }
+        let body = json_lines.join("\n");
+        let query = format!(
+            "INSERT INTO {}.{} FORMAT JSONEachRow",
+            self.config.database, table
+        );
+        let url = format!("{}/?query={}", self.base_url, urlencode(&query));
+        let resp = self.http.post(&url)
+            .body(body)
+            .send()
+            .await
+            .context("ClickHouse HTTP request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("ClickHouse insert {} failed: {} - {}", table, status, text);
+        }
         Ok(())
     }
 
     pub async fn insert_sensor_data(&self, data: &[SensorData]) -> Result<()> {
-        if let Some(ref client) = self.client {
-            let client = client.lock().await;
-            let mut insert = client.insert("sensor_data")?;
-            for d in data {
-                insert.write(d).await?;
-            }
-            insert.end().await?;
-        }
-        Ok(())
+        self.insert_rows("sensor_data", data).await
     }
 
     pub async fn insert_structure_analysis(&self, analysis: &StructureAnalysis) -> Result<()> {
-        if let Some(ref client) = self.client {
-            let client = client.lock().await;
-            let mut insert = client.insert("structure_analysis")?;
-            insert.write(analysis).await?;
-            insert.end().await?;
-        }
-        Ok(())
+        self.insert_rows("structure_analysis", &[analysis]).await
     }
 
     pub async fn insert_alert_events(&self, events: &[AlertEvent]) -> Result<()> {
-        if let Some(ref client) = self.client {
-            let client = client.lock().await;
-            let mut insert = client.insert("alert_events")?;
-            for e in events {
-                insert.write(e).await?;
-            }
-            insert.end().await?;
-        }
-        Ok(())
+        self.insert_rows("alert_events", events).await
     }
 
     pub async fn insert_ground_analysis(&self, analysis: &[GroundAnalysis]) -> Result<()> {
-        if let Some(ref client) = self.client {
-            let client = client.lock().await;
-            let mut insert = client.insert("ground_analysis")?;
-            for a in analysis {
-                insert.write(a).await?;
-            }
-            insert.end().await?;
-        }
-        Ok(())
+        self.insert_rows("ground_analysis", analysis).await
     }
 
     pub async fn insert_fem_results(&self, results: &[FEMNodeResult]) -> Result<()> {
-        if let Some(ref client) = self.client {
-            let client = client.lock().await;
-            let mut insert = client.insert("fem_node_results")?;
-            for r in results {
-                insert.write(r).await?;
-            }
-            insert.end().await?;
-        }
-        Ok(())
+        self.insert_rows("fem_node_results", results).await
     }
 
     pub async fn get_tower_metadata(&self, tower_id: u32) -> Result<Option<TowerMetadata>> {
@@ -131,6 +127,21 @@ impl ClickHouseClient {
     }
 }
 
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
 pub fn get_default_tower(tower_id: u32) -> TowerMetadata {
     match tower_id {
         2 => TowerMetadata {
@@ -170,14 +181,11 @@ pub fn get_default_tower(tower_id: u32) -> TowerMetadata {
 
 impl Default for ClickHouseClient {
     fn default() -> Self {
-        Self {
-            config: ClickHouseConfig {
-                url: "http://localhost:8123".to_string(),
-                user: "default".to_string(),
-                password: "".to_string(),
-                database: "siege_tower".to_string(),
-            },
-            client: None,
-        }
+        Self::new(ClickHouseConfig {
+            url: "http://localhost:8123".to_string(),
+            user: "default".to_string(),
+            password: "".to_string(),
+            database: "siege_tower".to_string(),
+        })
     }
 }

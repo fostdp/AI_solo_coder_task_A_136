@@ -57,6 +57,7 @@ function initApp() {
     initCharts();
     loadTowerInfo();
     bindEvents();
+    initLayerControlBar();
     loadInitialAnalysis();
     loadGroundAnalysis();
     connectSSE();
@@ -76,6 +77,7 @@ function init3DViewer() {
         });
     }
     viewer.updateLayerStresses(dummyStresses, currentTower.material_strength);
+    updateLayerStressLabels(dummyStresses);
 }
 
 function initCharts() {
@@ -228,6 +230,18 @@ function bindEvents() {
         viewer.setStressView(false);
     });
 
+    document.querySelectorAll('.cut-group .view-btn[data-cut]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.cut-group .view-btn[data-cut]').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            viewer.setCutMode(btn.dataset.cut);
+        });
+    });
+
+    document.getElementById('explodeSlider').addEventListener('input', e => {
+        viewer.applyExplosion(parseFloat(e.target.value));
+    });
+
     document.querySelectorAll('.chart-switch .sw').forEach(btn => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.chart-switch .sw').forEach(b => b.classList.remove('active'));
@@ -241,6 +255,51 @@ function bindEvents() {
     document.getElementById('simulateBtn').addEventListener('click', runSimulation);
 }
 
+function initLayerControlBar() {
+    const bar = document.getElementById('layerControlBar');
+    if (!bar || !viewer) return;
+    bar.innerHTML = '';
+
+    for (let i = 1; i <= currentTower.total_layers; i++) {
+        const chip = document.createElement('div');
+        chip.className = 'layer-chip';
+        chip.dataset.layer = i;
+        chip.innerHTML = `
+            <label class="chip-check">
+                <input type="checkbox" class="layer-visible" data-layer="${i}" checked>
+                <span>L${i}</span>
+            </label>
+            <div class="chip-meta">
+                <input type="range" class="layer-opacity" data-layer="${i}" min="0.1" max="1" step="0.05" value="1">
+                <span class="chip-stress" id="layerStressLbl${i}">--</span>
+            </div>
+        `;
+        bar.appendChild(chip);
+    }
+
+    bar.querySelectorAll('.layer-visible').forEach(cb => {
+        cb.addEventListener('change', e => {
+            const l = parseInt(e.target.dataset.layer);
+            viewer.setLayerVisible(l, e.target.checked);
+        });
+    });
+
+    bar.querySelectorAll('.layer-opacity').forEach(sl => {
+        sl.addEventListener('input', e => {
+            const l = parseInt(e.target.dataset.layer);
+            viewer.setLayerOpacity(l, parseFloat(e.target.value));
+        });
+    });
+}
+
+function updateLayerStressLabels(stresses) {
+    if (!stresses) return;
+    stresses.forEach(s => {
+        const lbl = document.getElementById(`layerStressLbl${s.layer}`);
+        if (lbl) lbl.textContent = `${s.stress?.toFixed?.(1) || '--'} MPa`;
+    });
+}
+
 function restart() {
     if (viewer) viewer.dispose();
     stressHistory = [];
@@ -251,6 +310,7 @@ function restart() {
     loadTowerInfo();
     init3DViewer();
     initCharts();
+    initLayerControlBar();
     loadInitialAnalysis();
     loadGroundAnalysis();
     connectSSE();
@@ -309,11 +369,12 @@ async function loadInitialAnalysis() {
 async function loadGroundAnalysis() {
     const ws = parseFloat(document.getElementById('windInput')?.value || 20);
     const tl = parseFloat(document.getElementById('tiltInput')?.value || 1);
+    const moist = parseFloat(document.getElementById('moistureInput')?.value || 50);
 
     let data = null;
     try {
         const resp = await fetch(
-            `${API_BASE}/api/towers/${currentTower.tower_id}/ground?wind_speed=${ws}&tilt_deg=${tl}`
+            `${API_BASE}/api/towers/${currentTower.tower_id}/ground?wind_speed=${ws}&tilt_deg=${tl}&moisture_pct=${moist}`
         );
         const json = await resp.json();
         if (json.code === 200) data = json.data;
@@ -510,9 +571,11 @@ async function runSimulation() {
     if (stresses?.layer_stresses) {
         const st = stresses.layer_stresses.map(([layer, vm, _tx, _tt]) => ({ layer, stress: vm }));
         viewer.updateLayerStresses(st, currentTower.material_strength);
+        updateLayerStressLabels(st);
     } else {
         const st = layers.map(l => ({ layer: l.layer_id, stress: l.stress_von_mises }));
         viewer.updateLayerStresses(st, currentTower.material_strength);
+        updateLayerStressLabels(st);
     }
 }
 
@@ -528,6 +591,7 @@ function updateFromData(sensorData, analysis, alerts, windSpeed, soilType) {
     if (sensorData?.length) {
         const stresses = sensorData.map(s => ({ layer: s.layer_id, stress: s.stress_von_mises }));
         viewer.updateLayerStresses(stresses, currentTower.material_strength);
+        updateLayerStressLabels(stresses);
         updateLayerChart(sensorData);
 
         const maxTilt = sensorData.reduce((m, s) => s.tilt_total > m.tilt_total ? s : m, sensorData[0]);

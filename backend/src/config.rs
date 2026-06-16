@@ -58,51 +58,67 @@ pub struct SimulationConfig {
     pub second_order_enabled: bool,
 }
 
-impl AppConfig {
-    pub fn load() -> Result<Self, config::ConfigError> {
-        let settings = config::Config::builder()
-            .add_source(config::File::with_name("config").required(false))
-            .add_source(config::Environment::with_prefix("SIEGE").separator("_"))
-            .set_default("server.host", "0.0.0.0")?
-            .set_default("server.port", 8080)?
-            .set_default("clickhouse.url", "http://localhost:8123")?
-            .set_default("clickhouse.user", "default")?
-            .set_default("clickhouse.password", "")?
-            .set_default("clickhouse.database", "siege_tower")?
-            .set_default("mqtt.broker", "localhost")?
-            .set_default("mqtt.port", 1883)?
-            .set_default("mqtt.client_id", "siege-tower-server")?
-            .set_default("mqtt.alert_topic", "siege/tower/alert")?
-            .set_default("mqtt.sensor_topic", "siege/tower/sensor")?
-            .set_default("alert.tilt_warning_threshold", 3.0)?
-            .set_default("alert.tilt_danger_threshold", 5.0)?
-            .set_default("alert.stress_warning_ratio", 0.75)?
-            .set_default("alert.stress_danger_ratio", 0.90)?
-            .set_default("alert.wind_warning_ratio", 0.80)?
-            .set_default("alert.wind_danger_ratio", 0.95)?
-            .set_default("alert.ground_warning_ratio", 0.80)?
-            .set_default("alert.ground_danger_ratio", 0.95)?
-            .set_default("simulation.gravity", 9.81)?
-            .set_default("simulation.air_density", 1.225)?
-            .set_default("simulation.wind_drag_coefficient", 1.3)?
-            .set_default("simulation.safety_factor_min", 1.5)?
-            .set_default("simulation.second_order_enabled", true)?
-            .build()?;
-
-        settings.try_deserialize()
-    }
-
-    pub fn init() -> &'static Self {
-        CONFIG.get_or_init(|| Self::load().unwrap_or_default())
-    }
-
-    pub fn get() -> &'static Self {
-        CONFIG.get().expect("Config not initialized")
-    }
+fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+fn env_or_str(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self::load().unwrap()
+        let _ = dotenvy::dotenv().ok();
+        Self {
+            server: ServerConfig {
+                host: env_or_str("SIEGE_SERVER_HOST", "0.0.0.0".into()),
+                port: env_or("SIEGE_SERVER_PORT", 8080u16),
+            },
+            clickhouse: ClickHouseConfig {
+                url: env_or_str("SIEGE_CLICKHOUSE_URL", "http://localhost:8123".into()),
+                user: env_or_str("SIEGE_CLICKHOUSE_USER", "default".into()),
+                password: env_or_str("SIEGE_CLICKHOUSE_PASSWORD", "".into()),
+                database: env_or_str("SIEGE_CLICKHOUSE_DATABASE", "siege_tower".into()),
+            },
+            mqtt: MqttConfig {
+                broker: env_or_str("SIEGE_MQTT_BROKER", "localhost".into()),
+                port: env_or("SIEGE_MQTT_PORT", 1883u16),
+                client_id: env_or_str("SIEGE_MQTT_CLIENT_ID", "siege-tower-server".into()),
+                username: std::env::var("SIEGE_MQTT_USERNAME").ok(),
+                password: std::env::var("SIEGE_MQTT_PASSWORD").ok(),
+                alert_topic: env_or_str("SIEGE_MQTT_ALERT_TOPIC", "siege/tower/alert".into()),
+                sensor_topic: env_or_str("SIEGE_MQTT_SENSOR_TOPIC", "siege/tower/sensor".into()),
+            },
+            alert: AlertConfig {
+                tilt_warning_threshold: env_or("SIEGE_ALERT_TILT_WARNING", 3.0f64),
+                tilt_danger_threshold: env_or("SIEGE_ALERT_TILT_DANGER", 5.0f64),
+                stress_warning_ratio: env_or("SIEGE_ALERT_STRESS_WARNING", 0.75f64),
+                stress_danger_ratio: env_or("SIEGE_ALERT_STRESS_DANGER", 0.90f64),
+                wind_warning_ratio: env_or("SIEGE_ALERT_WIND_WARNING", 0.80f64),
+                wind_danger_ratio: env_or("SIEGE_ALERT_WIND_DANGER", 0.95f64),
+                ground_warning_ratio: env_or("SIEGE_ALERT_GROUND_WARNING", 0.80f64),
+                ground_danger_ratio: env_or("SIEGE_ALERT_GROUND_DANGER", 0.95f64),
+            },
+            simulation: SimulationConfig {
+                gravity: env_or("SIEGE_SIM_GRAVITY", 9.81f64),
+                air_density: env_or("SIEGE_SIM_AIR_DENSITY", 1.225f64),
+                wind_drag_coefficient: env_or("SIEGE_SIM_WIND_DRAG", 1.3f64),
+                safety_factor_min: env_or("SIEGE_SIM_SAFETY_FACTOR_MIN", 1.5f64),
+                second_order_enabled: env_or("SIEGE_SIM_SECOND_ORDER", true),
+            },
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self::default())
+    }
+
+    pub fn init() -> &'static Self {
+        CONFIG.get_or_init(Self::default)
+    }
+
+    pub fn get() -> &'static Self {
+        CONFIG.get().expect("Config not initialized")
     }
 }

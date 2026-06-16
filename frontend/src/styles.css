@@ -146,7 +146,50 @@ body {
     flex-direction: column;
 }
 
-.panel-3d { grid-area: 3d; min-height: 520px; }
+.panel-3d { grid-area: 3d; min-height: 520px; display: flex; flex-direction: column; }
+.panel-3d .panel-header { flex-wrap: wrap; row-gap: 6px; }
+.cut-group { display: inline-flex; align-items: center; gap: 4px; }
+.cut-label { font-size: 11px; color: var(--text-muted); margin-right: 2px; }
+.explode-slider {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; background: var(--bg-elevated); border-radius: 6px;
+    border: 1px solid var(--border); font-size: 11px; color: var(--text-secondary);
+}
+.explode-slider input[type=range] {
+    width: 70px; height: 3px; accent-color: var(--accent); background: transparent;
+}
+
+.layer-control-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+.layer-chip {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px 4px 8px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--safe);
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+}
+.layer-chip:hover { border-color: var(--border-light); }
+.layer-chip input[type=checkbox] { accent-color: var(--accent); }
+.layer-chip .chip-name { color: var(--text-primary); font-weight: 600; min-width: 40px; }
+.layer-chip input[type=range] {
+    width: 60px; height: 3px; accent-color: var(--accent);
+}
+.layer-chip .stress-tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: var(--safe-bg); color: var(--safe); font-weight: 600;
+}
+.layer-chip.hidden { opacity: 0.55; text-decoration: line-through; }
+.layer-chip.hidden .stress-tag { background: var(--bg-tertiary); color: var(--text-muted); }
 .panel-summary { grid-area: summary; }
 .panel-charts { grid-area: charts; min-height: 320px; }
 .panel-ground { grid-area: ground; }
