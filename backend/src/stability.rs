@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, AlertThresholds};
 use crate::models::{SensorData, StructureAnalysis, TowerMetadata};
 
 pub struct StabilityAnalyzer;
@@ -123,7 +123,7 @@ impl StabilityAnalyzer {
         sensor_data: &[SensorData],
         config: &AppConfig,
     ) -> StructureAnalysis {
-        let sim = &config.simulation;
+        let sim = &config.tower.global_simulation;
         let mut max_stress = 0.0f64;
         let mut max_stress_layer: u8 = 1;
         let mut max_tilt = 0.0f64;
@@ -140,8 +140,8 @@ impl StabilityAnalyzer {
                 max_tilt = sd.tilt_total;
                 max_tilt_layer = sd.layer_id;
             }
-            if sd.wind_speed > max_wind_speed {
-                max_wind_speed = sd.wind_speed;
+            if sd.wind_speed_mps > max_wind_speed {
+                max_wind_speed = sd.wind_speed_mps;
             }
             if sd.ground_pressure > max_ground_pressure {
                 max_ground_pressure = sd.ground_pressure;

@@ -160,16 +160,13 @@ class SensorSimulator:
         settlement = self.settlement_cumulative + random.uniform(0.5, 2.0)
 
         return {
-            "wind_speed": round(wind_speed, 4),
-            "ground_pressure": round(applied, 4),
-            "ground_settlement": round(settlement, 4),
-            "soil_type": soil,
-            "temperature": round(15.0 + 15.0 * math.sin(time.time() / 86400 * 2 * math.pi)
+            "wind_speed_mps": round(wind_speed, 4),
+            "wind_direction_deg": round(random.uniform(0, 360), 2),
+            "ground_pressure_kpa": round(applied, 4),
+            "temperature_c": round(15.0 + 15.0 * math.sin(time.time() / 86400 * 2 * math.pi)
                                  + random.gauss(0, 2.0), 2),
-            "humidity": round(50.0 + 30.0 * math.sin(time.time() / 86400 * 2 * math.pi + 2.0)
+            "humidity_pct": round(50.0 + 30.0 * math.sin(time.time() / 86400 * 2 * math.pi + 2.0)
                               + random.gauss(0, 5.0), 2),
-            "vibration_freq": round(2.0 + wind_speed * 0.05 + random.gauss(0, 0.2), 4),
-            "vibration_amp": round(0.2 + wind_speed * 0.03 + random.gauss(0, 0.05), 4),
         }
 
     def generate_batch(self) -> Dict[str, Any]:
@@ -186,6 +183,8 @@ class SensorSimulator:
             stresses = self.simulate_layer_stresses(layer_id, total_layers, wind_speed, anomaly)
             tilts = self.simulate_tilt(layer_id, total_layers, wind_speed, anomaly)
             wind_loads = self.simulate_wind_load(layer_id, total_layers, wind_speed)
+            vib_freq = 2.0 + wind_speed * 0.05 + random.gauss(0, 0.2)
+            vib_amp = 0.2 + wind_speed * 0.03 + random.gauss(0, 0.05)
 
             layers.append({
                 "layer_id": layer_id,
@@ -193,6 +192,10 @@ class SensorSimulator:
                 **stresses,
                 **tilts,
                 **wind_loads,
+                "vibration_freq_hz": round(vib_freq, 4),
+                "vibration_amplitude": round(vib_amp, 4),
+                "battery_voltage": round(3.5 + random.uniform(0, 0.4), 2),
+                "signal_strength": round(-70 + random.uniform(0, 15), 1),
             })
 
         environment = self.simulate_environment(wind_speed)
@@ -218,7 +221,7 @@ class SensorSimulator:
                 analysis = (data.get("data") or {}).get("analysis", {})
                 sf = analysis.get("safety_factor", 0)
                 stable = "稳定" if analysis.get("is_stable") == 1 else "不稳定"
-                wind_spd = batch["environment"]["wind_speed"]
+                wind_spd = batch["environment"]["wind_speed_mps"]
                 print(
                     f"  {status} 塔{self.tower['tower_id']} | "
                     f"风速={wind_spd:.1f}m/s | 安全系数={sf:.2f} | "

@@ -1,5 +1,5 @@
 use crate::models::{FEMNode, FEMNodeResult, FEMElement, TowerMetadata};
-use nalgebra::{Matrix6, Matrix3, Vector3, DMatrix, DVector};
+use nalgebra::{Matrix3, Vector3, DMatrix, DVector};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -80,50 +80,119 @@ impl FEMAnalysis {
 
         let mut elem_id = 0u32;
         let nodes_per_layer = nx * ny;
+        let next_layer_offset = nodes_per_layer as u32;
         for layer in 0..n_layers {
             for iy in 0..(ny - 1) {
                 for ix in 0..(nx - 1) {
-                    let n0 = (layer * nodes_per_layer + iy * nx + ix) as u32;
-                    let n1 = n0 + 1;
-                    let n2 = n0 + nx as u32;
-                    let n3 = n2 + 1;
-                    self.elements.push(FEMElement {
-                        element_id: elem_id,
-                        node_ids: [n0, n1, n2, n3],
-                        layer_id: (layer + 1) as u8,
-                        elastic_modulus: tower.elastic_modulus,
-                        poisson_ratio: tower.poisson_ratio,
-                        density: tower.total_weight * 1000.0 / (total_h * base_w * base_d),
-                    });
-                    elem_id += 1;
+                    let base = (layer * nodes_per_layer + iy * nx + ix) as u32;
+                    let b0 = base;
+                    let b1 = base + 1;
+                    let b2 = base + nx as u32;
+                    let b3 = b2 + 1;
+                    let t0 = b0 + next_layer_offset;
+                    let t1 = b1 + next_layer_offset;
+                    let t2 = b2 + next_layer_offset;
+                    let t3 = b3 + next_layer_offset;
+
+                    let quads = [
+                        [b0, b1, b2, t0],
+                        [b1, b3, b2, t1],
+                        [b2, b3, t2, t0],
+                        [b1, t1, t0, b0],
+                        [t0, t1, t2, t3],
+                    ];
+                    for quad in quads.iter() {
+                        self.elements.push(FEMElement {
+                            element_id: elem_id,
+                            node_ids: *quad,
+                            layer_id: (layer + 1) as u8,
+                            elastic_modulus: tower.elastic_modulus,
+                            poisson_ratio: tower.poisson_ratio,
+                            density: tower.total_weight * 1000.0 / (total_h * base_w * base_d),
+                        });
+                        elem_id += 1;
+                    }
                 }
             }
         }
     }
 
-    fn calculate_element_stiffness(&self, elem: &FEMElement, coords: &[Vector3<f64>]) -> Matrix6<f64> {
+    fn calculate_element_stiffness(&self, elem: &FEMElement, coords: &[Vector3<f64>]) -> DMatrix<f64> {
         let e = elem.elastic_modulus;
         let nu = elem.poisson_ratio;
         let p0 = coords[0];
         let p1 = coords[1];
         let p2 = coords[2];
         let p3 = coords[3];
-        let mat = Matrix3::from_columns(&[p1 - p0, p2 - p0, p3 - p0]);
-        let volume = mat.determinant().abs() / 6.0;
+
+        let a_mat = Matrix3::from_columns(&[p1 - p0, p2 - p0, p3 - p0]);
+        let det = a_mat.determinant();
+        let volume = det.abs() / 6.0;
+
+        let mut ke = DMatrix::zeros(12, 12);
+        if volume < 1e-10 || det.abs() < 1e-10 {
+            for i in 0..12 {
+                ke[(i, i)] = 1e6;
+            }
+            return ke;
+        }
+
+        let a_inv = a_mat.try_inverse().unwrap_or_else(|| Matrix3::identity() * 1e-6);
+
+        let b = |i: usize| -> (f64, f64, f64) {
+            match i {
+                0 => {
+                    let bx = -(a_inv[(0, 0)] + a_inv[(0, 1)] + a_inv[(0, 2)]);
+                    let by = -(a_inv[(1, 0)] + a_inv[(1, 1)] + a_inv[(1, 2)]);
+                    let bz = -(a_inv[(2, 0)] + a_inv[(2, 1)] + a_inv[(2, 2)]);
+                    (bx, by, bz)
+                }
+                1 => (a_inv[(0, 0)], a_inv[(1, 0)], a_inv[(2, 0)]),
+                2 => (a_inv[(0, 1)], a_inv[(1, 1)], a_inv[(2, 1)]),
+                3 => (a_inv[(0, 2)], a_inv[(1, 2)], a_inv[(2, 2)]),
+                _ => (0.0, 0.0, 0.0),
+            }
+        };
 
         let c1 = e / ((1.0 + nu) * (1.0 - 2.0 * nu));
-        let c = Matrix6::new(
-            c1 * (1.0 - nu), c1 * nu,          c1 * nu,          0.0,       0.0,       0.0,
-            c1 * nu,          c1 * (1.0 - nu), c1 * nu,          0.0,       0.0,       0.0,
-            c1 * nu,          c1 * nu,          c1 * (1.0 - nu), 0.0,       0.0,       0.0,
-            0.0,              0.0,              0.0,              c1 * (1.0 - 2.0 * nu) / 2.0, 0.0, 0.0,
-            0.0,              0.0,              0.0,              0.0,       c1 * (1.0 - 2.0 * nu) / 2.0, 0.0,
-            0.0,              0.0,              0.0,              0.0,       0.0,       c1 * (1.0 - 2.0 * nu) / 2.0,
-        );
-        let b = Matrix6::zeros();
-        let mut kt: Matrix6<f64> = b.transpose() * c * b * volume;
-        kt.scale_diagonal_mut(1e6);
-        kt
+        let mut cm = DMatrix::zeros(6, 6);
+        cm[(0, 0)] = c1 * (1.0 - nu);
+        cm[(0, 1)] = c1 * nu;
+        cm[(0, 2)] = c1 * nu;
+        cm[(1, 0)] = c1 * nu;
+        cm[(1, 1)] = c1 * (1.0 - nu);
+        cm[(1, 2)] = c1 * nu;
+        cm[(2, 0)] = c1 * nu;
+        cm[(2, 1)] = c1 * nu;
+        cm[(2, 2)] = c1 * (1.0 - nu);
+        cm[(3, 3)] = c1 * (1.0 - 2.0 * nu) / 2.0;
+        cm[(4, 4)] = c1 * (1.0 - 2.0 * nu) / 2.0;
+        cm[(5, 5)] = c1 * (1.0 - 2.0 * nu) / 2.0;
+
+        let mut bmat = DMatrix::zeros(6, 12);
+        for i in 0..4 {
+            let (bx, by, bz) = b(i);
+            let col = i * 3;
+            bmat[(0, col)]     = bx;
+            bmat[(1, col + 1)] = by;
+            bmat[(2, col + 2)] = bz;
+            bmat[(3, col)]     = by;
+            bmat[(3, col + 1)] = bx;
+            bmat[(4, col + 1)] = bz;
+            bmat[(4, col + 2)] = by;
+            bmat[(5, col)]     = bz;
+            bmat[(5, col + 2)] = bx;
+        }
+
+        let bt = bmat.transpose();
+        ke = bt * cm * bmat * volume;
+
+        for i in 0..12 {
+            if ke[(i, i)].abs() < 1e-6 {
+                ke[(i, i)] = 1e6;
+            }
+        }
+        ke
     }
 
     pub fn assemble_matrices(&mut self) {
@@ -347,7 +416,24 @@ impl FEMAnalysis {
         (disp, lambda, lambda_cr, total_iters, converged)
     }
 
-    pub fn apply_second_order_effects(&mut self, tower: &TowerMetadata) {
+    pub fn apply_second_order_effects(
+        &mut self,
+        tower: &TowerMetadata,
+        design_wind_speed: f64,
+        gravity: f64,
+        air_density: f64,
+        wind_drag_coefficient: f64,
+        enabled: bool,
+        _thresholds: &crate::config::AlertThresholds,
+    ) {
+        if !enabled {
+            self.metadata_second_order = Some(SecondOrderMeta {
+                factor: 1.0,
+                load_factor: 1.0,
+                critical_load_factor: f64::INFINITY,
+            });
+            return;
+        }
         let (disp, lambda, lambda_cr, _iters, _conv) = self.solve_arc_length(tower, 1.5, 8);
         self.displacements = disp;
 

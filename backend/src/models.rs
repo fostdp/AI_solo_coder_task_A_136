@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,21 @@ impl SoilType {
     }
 }
 
+impl FromStr for SoilType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "sand" => Ok(SoilType::Sand),
+            "clay" => Ok(SoilType::Clay),
+            "silt" => Ok(SoilType::Silt),
+            "rock" => Ok(SoilType::Rock),
+            "loam" => Ok(SoilType::Loam),
+            _ => Err(format!("未知土壤类型: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TowerMetadata {
     pub tower_id: u32,
@@ -88,12 +104,12 @@ pub struct SensorData {
     pub tilt_total: f64,
     pub wind_load_x: f64,
     pub wind_load_y: f64,
-    pub wind_speed: f64,
+    pub wind_speed_mps: f64,
     pub ground_pressure: f64,
     pub ground_settlement: f64,
     pub soil_type: String,
-    pub temperature: f64,
-    pub humidity: f64,
+    pub temperature_c: f64,
+    pub humidity_pct: f64,
     pub vibration_freq: f64,
     pub vibration_amp: f64,
     #[serde(default)]
@@ -166,6 +182,30 @@ pub struct StructureAnalysis {
     pub second_order_effect: f64,
     pub natural_frequency: f64,
     pub damping_ratio: f64,
+}
+
+impl StructureAnalysis {
+    pub fn default_error(msg: &str) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            tower_id: 0,
+            tower_name: format!("ERROR: {}", msg),
+            safety_factor: 0.0,
+            critical_stress: 0.0,
+            max_stress: 0.0,
+            max_stress_layer: 0,
+            max_tilt: 0.0,
+            max_tilt_layer: 0,
+            wind_resistance_limit: 0.0,
+            current_wind_factor: 0.0,
+            ground_capacity_ratio: 0.0,
+            is_stable: 0,
+            stability_margin: 0.0,
+            second_order_effect: 0.0,
+            natural_frequency: 0.0,
+            damping_ratio: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,7 +312,39 @@ pub struct BatchSensorData {
     pub tower_name: String,
     pub timestamp: DateTime<Utc>,
     pub layers: Vec<SensorLayerData>,
-    pub environment: EnvironmentData,
+    pub environment: Option<EnvironmentData>,
+}
+
+impl BatchSensorData {
+    pub fn from_sensor_data(sensor_data: &[SensorData], tower_id: u32) -> Self {
+        use chrono::Utc;
+        let tower_name = sensor_data.first().map(|s| s.tower_name.clone()).unwrap_or_default();
+        let layers = sensor_data.iter().map(|s| {
+            SensorLayerData {
+                layer_id: s.layer_id,
+                layer_name: s.layer_name.clone(),
+                stress_x: s.stress_x,
+                stress_y: s.stress_y,
+                stress_z: s.stress_z,
+                stress_von_mises: s.stress_von_mises,
+                tilt_x: s.tilt_x,
+                tilt_y: s.tilt_y,
+                tilt_total: s.tilt_total,
+                vibration_freq_hz: s.vibration_freq,
+                vibration_amplitude: s.vibration_amp,
+                battery_voltage: 3.7,
+                signal_strength: -65.0,
+            }
+        }).collect();
+        let environment = sensor_data.first().map(|s| EnvironmentData {
+            wind_speed_mps: s.wind_speed_mps,
+            wind_direction_deg: 0.0,
+            ground_pressure_kpa: s.ground_pressure,
+            temperature_c: s.temperature_c,
+            humidity_pct: s.humidity_pct,
+        });
+        Self { tower_id, tower_name, timestamp: Utc::now(), layers, environment }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,27 +358,28 @@ pub struct SensorLayerData {
     pub tilt_x: f64,
     pub tilt_y: f64,
     pub tilt_total: f64,
-    pub wind_load_x: f64,
-    pub wind_load_y: f64,
+    pub vibration_freq_hz: f64,
+    pub vibration_amplitude: f64,
+    pub battery_voltage: f64,
+    pub signal_strength: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentData {
-    pub wind_speed: f64,
-    pub ground_pressure: f64,
-    pub ground_settlement: f64,
-    pub soil_type: String,
-    pub temperature: f64,
-    pub humidity: f64,
-    pub vibration_freq: f64,
-    pub vibration_amp: f64,
+    pub wind_speed_mps: f64,
+    pub wind_direction_deg: f64,
+    pub ground_pressure_kpa: f64,
+    pub temperature_c: f64,
+    pub humidity_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
-    pub code: u32,
+    pub code: u16,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+    pub timestamp: String,
 }
 
 impl<T> ApiResponse<T> {
@@ -315,14 +388,16 @@ impl<T> ApiResponse<T> {
             code: 200,
             message: "success".to_string(),
             data: Some(data),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         }
     }
 
-    pub fn error(code: u32, message: String) -> Self {
+    pub fn error(code: u16, message: String) -> Self {
         Self {
             code,
             message,
             data: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
         }
     }
 }

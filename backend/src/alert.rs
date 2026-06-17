@@ -1,4 +1,4 @@
-use crate::config::AlertConfig;
+use crate::config::AlertThresholds;
 use crate::models::{AlertEvent, AlertType, SensorData, StructureAnalysis, TowerMetadata};
 use std::collections::HashMap;
 
@@ -30,31 +30,34 @@ impl AlertManager {
         &mut self,
         tower: &TowerMetadata,
         data: &[SensorData],
-        config: &AlertConfig,
+        config: &AlertThresholds,
     ) -> Vec<AlertEvent> {
         let mut alerts = Vec::new();
         let tower_name = tower.tower_name.clone();
         let tower_id = tower.tower_id;
 
+        let vib_bandwidth = config.vibration_resonance_bandwidth_pct / 100.0;
+        let vib_danger_amp = config.vibration_danger_amplitude;
+
         for sd in data {
-            if sd.tilt_total >= config.tilt_danger_threshold {
+            if sd.tilt_total >= config.tilt_danger_deg {
                 let key = format!("tilt_danger_{}_{}", tower_id, sd.layer_id);
                 if self.should_alert(&key) {
                     alerts.push(AlertEvent::new(
                         tower_id, tower_name.clone(),
                         AlertType::TiltExceed, 3,
                         sd.layer_id, "tilt_total".to_string(),
-                        sd.tilt_total, config.tilt_danger_threshold,
+                        sd.tilt_total, config.tilt_danger_deg,
                     ));
                 }
-            } else if sd.tilt_total >= config.tilt_warning_threshold {
+            } else if sd.tilt_total >= config.tilt_warning_deg {
                 let key = format!("tilt_warn_{}_{}", tower_id, sd.layer_id);
                 if self.should_alert(&key) {
                     alerts.push(AlertEvent::new(
                         tower_id, tower_name.clone(),
                         AlertType::TiltExceed, 1,
                         sd.layer_id, "tilt_total".to_string(),
-                        sd.tilt_total, config.tilt_warning_threshold,
+                        sd.tilt_total, config.tilt_warning_deg,
                     ));
                 }
             }
@@ -84,15 +87,15 @@ impl AlertManager {
                 }
             }
 
-            let wind_ratio = sd.wind_speed / tower.design_wind_speed;
+            let wind_ratio = sd.wind_speed_mps / tower.design_wind_speed;
             if wind_ratio >= config.wind_danger_ratio {
                 let key = format!("wind_danger_{}", tower_id);
                 if self.should_alert(&key) {
                     alerts.push(AlertEvent::new(
                         tower_id, tower_name.clone(),
                         AlertType::WindOverload, 2,
-                        sd.layer_id, "wind_speed".to_string(),
-                        sd.wind_speed,
+                        sd.layer_id, "wind_speed_mps".to_string(),
+                        sd.wind_speed_mps,
                         tower.design_wind_speed * config.wind_danger_ratio,
                     ));
                 }
@@ -102,8 +105,8 @@ impl AlertManager {
                     alerts.push(AlertEvent::new(
                         tower_id, tower_name.clone(),
                         AlertType::WindOverload, 1,
-                        sd.layer_id, "wind_speed".to_string(),
-                        sd.wind_speed,
+                        sd.layer_id, "wind_speed_mps".to_string(),
+                        sd.wind_speed_mps,
                         tower.design_wind_speed * config.wind_warning_ratio,
                     ));
                 }
@@ -145,14 +148,14 @@ impl AlertManager {
                 / 12.0 / (tower.total_weight * 1000.0) / tower.total_height.powi(3)).sqrt()
                 * 1.875_f64.powi(2) / (2.0 * std::f64::consts::PI);
             let freq_ratio = (sd.vibration_freq - natural_freq).abs() / natural_freq;
-            if freq_ratio < 0.05 && sd.vibration_amp > 2.0 {
+            if freq_ratio < vib_bandwidth && sd.vibration_amp > vib_danger_amp {
                 let key = format!("vib_exceed_{}", tower_id);
                 if self.should_alert(&key) {
                     alerts.push(AlertEvent::new(
                         tower_id, tower_name.clone(),
                         AlertType::VibrationExceed, 2,
                         sd.layer_id, "vibration_freq".to_string(),
-                        sd.vibration_freq, natural_freq * 1.05,
+                        sd.vibration_freq, natural_freq * (1.0 + vib_bandwidth),
                     ));
                 }
             }
@@ -164,11 +167,12 @@ impl AlertManager {
     pub fn check_structure_alerts(
         &mut self,
         analysis: &StructureAnalysis,
-        min_sf: f64,
+        config: &AlertThresholds,
     ) -> Vec<AlertEvent> {
         let mut alerts = Vec::new();
         let tower_id = analysis.tower_id;
         let tower_name = analysis.tower_name.clone();
+        let min_sf = 1.5;
 
         if analysis.is_stable == 0 {
             let key = format!("instability_{}", tower_id);
@@ -182,14 +186,14 @@ impl AlertManager {
             }
         }
 
-        if analysis.current_wind_factor >= 0.9 {
+        if analysis.current_wind_factor >= config.wind_danger_ratio {
             let key = format!("wind_limit_{}", tower_id);
             if self.should_alert(&key) {
                 alerts.push(AlertEvent::new(
                     tower_id, tower_name.clone(),
                     AlertType::WindOverload, 3,
                     analysis.max_tilt_layer, "current_wind_factor".to_string(),
-                    analysis.current_wind_factor, 0.9,
+                    analysis.current_wind_factor, config.wind_danger_ratio,
                 ));
             }
         }

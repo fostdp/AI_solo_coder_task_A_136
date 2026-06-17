@@ -22,7 +22,7 @@ anyhow = "1.0"
 parking_lot = "0.12"
 dotenvy = "0.15"
 once_cell = "1.19"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
 http = "1.0"
 futures-core = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
