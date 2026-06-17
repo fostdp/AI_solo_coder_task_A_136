@@ -7,6 +7,7 @@ use axum::{
 
 pub fn create_routes(state: SharedState) -> Router {
     Router::new()
+        .route("/metrics", get(prometheus_metrics))
         .route("/api/health", get(health))
         .route("/api/towers", get(get_all_towers))
         .route("/api/towers/:tower_id", get(get_tower))

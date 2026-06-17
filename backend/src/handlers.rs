@@ -54,6 +54,16 @@ pub struct AnalysisQuery {
     pub moisture_pct: Option<f64>,
 }
 
+pub async fn prometheus_metrics() -> impl IntoResponse {
+    use axum::http::header;
+    let body = crate::metrics::gather_metrics();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
 pub async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({
         "status": "ok",

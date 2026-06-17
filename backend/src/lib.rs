@@ -8,6 +8,7 @@ pub mod alert;
 pub mod mqtt_client;
 pub mod handlers;
 pub mod routes;
+pub mod metrics;
 
 pub mod dtu_receiver;
 pub mod structural_simulator;
